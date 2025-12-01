@@ -32,6 +32,7 @@ from typing import Iterable, List, Optional, Set, Tuple
 
 import requests
 import re
+import urllib3
 
 
 class ISEAPIError(RuntimeError):
@@ -340,6 +341,8 @@ def main(argv: Iterable[str]) -> int:
     session.auth = (args.username, args.password)
     session.verify = not args.insecure
     session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
+    if args.insecure:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     try:
         parent_group = get_endpoint_group(session, ers_api_base, args.endpoint_parent)
