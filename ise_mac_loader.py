@@ -224,6 +224,44 @@ def policy_uses_group(
     return False
 
 
+def build_policy_api_base(raw_url: str) -> str:
+    """Normalize base URL for policy OpenAPI calls (/api/v1)."""
+    base = raw_url.split("/api/v1")[0].rstrip("/")
+    if base.endswith("/api/v1"):
+        return base
+    return f"{base}/api/v1"
+
+
+def policy_uses_group_openapi(
+    session: requests.Session, policy_api_base: str, group_name: str
+) -> bool:
+    """
+    Check if any network access policy set authorization rules reference the group name.
+
+    Uses OpenAPI endpoints:
+      - GET /api/v1/policy/network-access/policy-set
+      - GET /api/v1/policy/network-access/policy-set/{policyId}/authorization
+    """
+    group_l = group_name.lower()
+    data, _ = request_ise(session, policy_api_base, "GET", "/policy/network-access/policy-set")
+    items = data.get("response") if isinstance(data, dict) else []
+    if items is None:
+        items = []
+    for item in items:
+        policy_id = item.get("id") or item.get("policyId")
+        if not policy_id:
+            continue
+        body, _ = request_ise(
+            session,
+            policy_api_base,
+            "GET",
+            f"/policy/network-access/policy-set/{policy_id}/authorization",
+        )
+        if group_l in str(body).lower():
+            return True
+    return False
+
+
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Load MAC addresses into Cisco ISE Endpoint Identity Group (ERS API)."
@@ -295,7 +333,8 @@ def main(argv: Iterable[str]) -> int:
         print("No MAC addresses provided.", file=sys.stderr)
         return 1
 
-    api_base = args.ise_url.rstrip("/")
+    ers_api_base = args.ise_url.rstrip("/")
+    policy_api_base = build_policy_api_base(args.ise_url)
 
     session = requests.Session()
     session.auth = (args.username, args.password)
@@ -303,8 +342,8 @@ def main(argv: Iterable[str]) -> int:
     session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
 
     try:
-        parent_group = get_endpoint_group(session, api_base, args.endpoint_parent)
-        group = get_endpoint_group(session, api_base, site_name)
+        parent_group = get_endpoint_group(session, ers_api_base, args.endpoint_parent)
+        group = get_endpoint_group(session, ers_api_base, site_name)
 
         if args.dryrun:
             if not group:
@@ -314,25 +353,25 @@ def main(argv: Iterable[str]) -> int:
             group_id = extract_id(group)
             if not group_id:
                 raise ISEAPIError("Could not determine endpoint group ID.")
-            existing, missing = check_macs(session, api_base, macs)
-            in_policy = policy_uses_group(session, api_base, site_name)
+            existing, missing = check_macs(session, ers_api_base, macs)
+            in_policy = policy_uses_group_openapi(session, policy_api_base, site_name)
         else:
             if not parent_group:
-                parent_group = create_endpoint_group(session, api_base, args.endpoint_parent)
+                parent_group = create_endpoint_group(session, ers_api_base, args.endpoint_parent)
             parent_id = extract_id(parent_group)
             if not parent_id:
                 raise ISEAPIError("Could not determine parent endpoint group ID.")
 
             if not group:
                 group = create_endpoint_group(
-                    session, api_base, site_name, parent_id=parent_id
+                    session, ers_api_base, site_name, parent_id=parent_id
                 )
             group_id = extract_id(group)
             if not group_id:
                 raise ISEAPIError("Could not determine endpoint group ID.")
 
-            created, skipped = add_macs_to_group(session, api_base, macs, group_id)
-            in_policy = policy_uses_group(session, api_base, site_name)
+            created, skipped = add_macs_to_group(session, ers_api_base, macs, group_id)
+            in_policy = policy_uses_group_openapi(session, policy_api_base, site_name)
     except (ISEAPIError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

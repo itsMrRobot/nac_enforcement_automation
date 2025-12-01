@@ -88,6 +88,7 @@ python ise_mac_loader.py --site-name "My Branch" \
 
 ## Notes
 - The ISE loader uses the Endpoint Identity Group model via ERS endpoints (e.g., `/ers/config/endpointgroup`, `/ers/config/endpoint`, `/ers/config/policyset`). Ensure ERS is enabled.
+- Policy checks use the OpenAPI policy endpoint (`/api/v1/policy/network-access/policy-set/...`); ensure that endpoint is reachable on your ISE host.
 - Policy reference check is best-effort: it scans policy sets for the group name string. Tailor it if you need a stricter linkage.
 - When not running `--dryrun`, the loader will create the parent Endpoint Group (default `Sites`) if it is missing, then create the site group under it.
 - Handle credentials securely (avoid committing them). Use environment variables or a secrets manager where possible.
