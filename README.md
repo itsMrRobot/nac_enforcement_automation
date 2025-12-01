@@ -84,6 +84,7 @@ python ise_mac_loader.py --site-name "My Branch" \
   - `--username` / `--password` (flags or env `ISE_USERNAME`/`ISE_PASSWORD`)
   - `--insecure` (disable TLS verification for lab/self-signed)
   - `--dryrun` (validate only; no creations/updates)
+  - Site names are normalized to alphanumeric/underscore/dash (invalid characters become `_`).
 
 ## Notes
 - The ISE loader uses the Endpoint Identity Group model via ERS endpoints (e.g., `/ers/config/endpointgroup`, `/ers/config/endpoint`, `/ers/config/policyset`). Ensure ERS is enabled.

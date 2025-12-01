@@ -31,6 +31,7 @@ import time
 from typing import Iterable, List, Optional, Set, Tuple
 
 import requests
+import re
 
 
 class ISEAPIError(RuntimeError):
@@ -97,6 +98,13 @@ def extract_id(resource: Optional[dict]) -> Optional[str]:
     if isinstance(resp, dict):
         return extract_id(resp)
     return None
+
+
+def sanitize_name(name: str) -> str:
+    """Normalize names to alphanumeric, dash, or underscore (preferring underscores)."""
+    sanitized = re.sub(r"[^A-Za-z0-9_-]+", "_", name)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    return sanitized
 
 
 def get_endpoint_group(
@@ -269,6 +277,13 @@ def main(argv: Iterable[str]) -> int:
         print("Error: ISE credentials are required (--username/--password or env vars).", file=sys.stderr)
         return 1
 
+    site_name = sanitize_name(args.site_name)
+    if not site_name:
+        print("Error: Sanitized site name is empty after removing invalid characters.", file=sys.stderr)
+        return 1
+    if site_name != args.site_name:
+        print(f"Note: site name normalized to '{site_name}' for ISE compatibility.")
+
     # Load MACs
     if args.mac_file:
         with open(args.mac_file, "r", encoding="utf-8") as fh:
@@ -289,18 +304,18 @@ def main(argv: Iterable[str]) -> int:
 
     try:
         parent_group = get_endpoint_group(session, api_base, args.endpoint_parent)
-        group = get_endpoint_group(session, api_base, args.site_name)
+        group = get_endpoint_group(session, api_base, site_name)
 
         if args.dryrun:
             if not group:
-                print(f"DRY RUN: Endpoint group '{args.site_name}' not found; skipping MAC and policy checks.")
+                print(f"DRY RUN: Endpoint group '{site_name}' not found; skipping MAC and policy checks.")
                 print(f"Parent group '{args.endpoint_parent}' exists: {bool(parent_group)}")
                 return 0
             group_id = extract_id(group)
             if not group_id:
                 raise ISEAPIError("Could not determine endpoint group ID.")
             existing, missing = check_macs(session, api_base, macs)
-            in_policy = policy_uses_group(session, api_base, args.site_name)
+            in_policy = policy_uses_group(session, api_base, site_name)
         else:
             if not parent_group:
                 parent_group = create_endpoint_group(session, api_base, args.endpoint_parent)
@@ -310,14 +325,14 @@ def main(argv: Iterable[str]) -> int:
 
             if not group:
                 group = create_endpoint_group(
-                    session, api_base, args.site_name, parent_id=parent_id
+                    session, api_base, site_name, parent_id=parent_id
                 )
             group_id = extract_id(group)
             if not group_id:
                 raise ISEAPIError("Could not determine endpoint group ID.")
 
             created, skipped = add_macs_to_group(session, api_base, macs, group_id)
-            in_policy = policy_uses_group(session, api_base, args.site_name)
+            in_policy = policy_uses_group(session, api_base, site_name)
     except (ISEAPIError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -329,7 +344,7 @@ def main(argv: Iterable[str]) -> int:
         print(f"Policy references group: {in_policy}")
         return 0
 
-    print(f"Endpoint group: {args.site_name} (id={group_id})")
+    print(f"Endpoint group: {site_name} (id={group_id})")
     print(f"MACs processed: {len(macs)} | created: {created} | existing: {skipped}")
     print(f"Policy references group: {in_policy}")
     return 0
