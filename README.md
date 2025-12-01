@@ -45,6 +45,14 @@ python meraki_mac_scraper.py --site-name "My Branch" \
       --ise-url https://ise.example.com:9060 \
       --username "$ISE_USERNAME" --password "$ISE_PASSWORD"
 ```
+Run in dry-run (read-only) mode to validate without creating/updating:
+```bash
+python meraki_mac_scraper.py --site-name "My Branch" \
+  | python ise_mac_loader.py --site-name "My Branch" \
+      --ise-url https://ise.example.com:9060 \
+      --username "$ISE_USERNAME" --password "$ISE_PASSWORD" \
+      --dryrun
+```
 Alternatively, read MACs from a file:
 ```bash
 python ise_mac_loader.py --site-name "My Branch" \
@@ -72,6 +80,7 @@ python ise_mac_loader.py --site-name "My Branch" \
   - `--ise-url` (required; e.g., `https://ise.example.com:9060`)
   - `--username` / `--password` (flags or env `ISE_USERNAME`/`ISE_PASSWORD`)
   - `--insecure` (disable TLS verification for lab/self-signed)
+  - `--dryrun` (validate only; no creations/updates)
 
 ## Notes
 - The ISE loader uses the Endpoint Identity Group model; if your environment expects a different “MAC list” object, adjust the API paths/payloads accordingly.

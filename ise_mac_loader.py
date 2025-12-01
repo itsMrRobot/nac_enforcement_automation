@@ -20,6 +20,7 @@ Notes:
     - The script creates (if needed) an Endpoint Identity Group named after the site.
     - Each MAC is added as an endpoint in that group if not already present.
     - A final check scans policy sets for references to the group name and prints True/False.
+    - Use --dryrun to perform read-only validation (no creations/updates).
 """
 
 import argparse
@@ -112,11 +113,11 @@ def create_endpoint_group(
 
 
 def ensure_endpoint_group(
-    session: requests.Session, base_url: str, site_name: str
-) -> dict:
-    """Fetch or create the endpoint group for the site."""
+    session: requests.Session, base_url: str, site_name: str, create_missing: bool = True
+) -> Optional[dict]:
+    """Fetch the endpoint group for the site, optionally creating it when missing."""
     group = get_endpoint_group(session, base_url, site_name)
-    if group:
+    if group or not create_missing:
         return group
     return create_endpoint_group(session, base_url, site_name)
 
@@ -160,6 +161,20 @@ def add_macs_to_group(
         create_endpoint(session, base_url, mac, group_id)
         created += 1
     return created, skipped
+
+
+def check_macs(
+    session: requests.Session, base_url: str, macs: List[str]
+) -> Tuple[int, int]:
+    """Count how many provided MACs already exist in ISE. Returns (existing, missing)."""
+    existing = 0
+    missing = 0
+    for mac in macs:
+        if get_endpoint_by_mac(session, base_url, mac):
+            existing += 1
+        else:
+            missing += 1
+    return existing, missing
 
 
 def policy_uses_group(
@@ -218,6 +233,11 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         action="store_true",
         help="Disable TLS verification (useful for lab/self-signed; not recommended for production).",
     )
+    parser.add_argument(
+        "--dryrun",
+        action="store_true",
+        help="Read-only: validate group/MAC/policy existence without creating or updating anything.",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -245,16 +265,31 @@ def main(argv: Iterable[str]) -> int:
     session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
 
     try:
-        group = ensure_endpoint_group(session, args.ise_url, args.site_name)
-        group_id = group.get("id") or group.get("ID") or group.get("uuid")
-        if not group_id:
-            raise ISEAPIError("Could not determine endpoint group ID.")
+        if args.dryrun:
+            group = ensure_endpoint_group(session, args.ise_url, args.site_name, create_missing=False)
+            group_id = None
+            if group:
+                group_id = group.get("id") or group.get("ID") or group.get("uuid")
+            existing, missing = check_macs(session, args.ise_url, macs)
+            in_policy = policy_uses_group(session, args.ise_url, args.site_name)
+        else:
+            group = ensure_endpoint_group(session, args.ise_url, args.site_name)
+            group_id = group.get("id") or group.get("ID") or group.get("uuid")
+            if not group_id:
+                raise ISEAPIError("Could not determine endpoint group ID.")
 
-        created, skipped = add_macs_to_group(session, args.ise_url, macs, group_id)
-        in_policy = policy_uses_group(session, args.ise_url, args.site_name)
+            created, skipped = add_macs_to_group(session, args.ise_url, macs, group_id)
+            in_policy = policy_uses_group(session, args.ise_url, args.site_name)
     except (ISEAPIError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+    if args.dryrun:
+        print("DRY RUN: no changes applied.")
+        print(f"Endpoint group exists: {bool(group)}" + (f" (id={group_id})" if group_id else ""))
+        print(f"MACs provided: {len(macs)} | existing in ISE: {existing} | missing: {missing}")
+        print(f"Policy references group: {in_policy}")
+        return 0
 
     print(f"Endpoint group: {args.site_name} (id={group_id})")
     print(f"MACs processed: {len(macs)} | created: {created} | existing: {skipped}")
