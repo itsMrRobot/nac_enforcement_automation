@@ -5,7 +5,7 @@ Scripts for gathering active client MAC addresses from Cisco Meraki and loading 
 ## Prerequisites
 - Python 3.9+ installed.
 - Cisco Meraki Dashboard API key with access to the target organization/network.
- - Cisco ISE OpenAPI (3.x+) reachable at a base like `https://ise.example.com:443/api/v1`, with credentials that can manage Endpoint Identity Groups and Endpoints. Make sure OpenAPI is enabled on your ISE version.
+- Cisco ISE ERS API reachable (e.g., `https://ise.example.com:9060`), with credentials that can manage Endpoint Identity Groups and Endpoints. Make sure ERS is enabled on your ISE version.
 - (Optional) Ability to disable TLS verification for lab/self-signed ISE via `--insecure`.
 
 ## Setup (venv)
@@ -17,7 +17,7 @@ pip install -r requirements.txt
 
 ## Scripts
 - `meraki_mac_scraper.py`: Pull active client MACs from a Meraki site (network).
-- `ise_mac_loader.py`: (ISE OpenAPI 3.x+) Create/ensure a matching Endpoint Identity Group in ISE and load those MACs as endpoints, then report if any policy references that group.
+- `ise_mac_loader.py`: (ISE ERS) Create/ensure a matching Endpoint Identity Group in ISE and load those MACs as endpoints, then report if any policy references that group.
 
 ## Usage
 
@@ -42,14 +42,15 @@ Pipe the Meraki output into ISE loader:
 ```bash
 python meraki_mac_scraper.py --site-name "My Branch" \
   | python ise_mac_loader.py --site-name "My Branch" \
-      --ise-url https://ise.example.com:443/api/v1 \
+      --ise-url https://ise.example.com:9060 \
       --username "$ISE_USERNAME" --password "$ISE_PASSWORD"
 ```
+Site groups are nested under a parent Endpoint Group (default: `Sites`). Provide a different parent with `--endpoint-parent "MyParent"`.
 Run in dry-run (read-only) mode to validate without creating/updating:
 ```bash
 python meraki_mac_scraper.py --site-name "My Branch" \
   | python ise_mac_loader.py --site-name "My Branch" \
-      --ise-url https://ise.example.com:443/api/v1 \
+      --ise-url https://ise.example.com:9060 \
       --username "$ISE_USERNAME" --password "$ISE_PASSWORD" \
       --dryrun
 ```
@@ -57,11 +58,10 @@ Dry-run will stop after reporting that the endpoint group is missing if it does 
 Alternatively, read MACs from a file:
 ```bash
 python ise_mac_loader.py --site-name "My Branch" \
-  --ise-url https://ise.example.com:443/api/v1 \
+  --ise-url https://ise.example.com:9060 \
   --mac-file macs.txt \
   --username "$ISE_USERNAME" --password "$ISE_PASSWORD"
 ```
-Note: If you pass only the host (e.g., `https://ise.example.com`), the script will append `/api/v1` automatically.
 
 ### 3) Outputs
 - `meraki_mac_scraper.py` prints MACs (one per line).
@@ -79,12 +79,14 @@ Note: If you pass only the host (e.g., `https://ise.example.com`), the script wi
 - ISE loader:
   - `--site-name` (required; becomes Endpoint Identity Group name)
   - `--mac-file` (optional; defaults to stdin)
-  - `--ise-url` (required; e.g., `https://ise.example.com:443/api/v1`)
+  - `--ise-url` (required; e.g., `https://ise.example.com:9060`)
+  - `--endpoint-parent` (optional; parent Endpoint Group name; default `Sites`)
   - `--username` / `--password` (flags or env `ISE_USERNAME`/`ISE_PASSWORD`)
   - `--insecure` (disable TLS verification for lab/self-signed)
   - `--dryrun` (validate only; no creations/updates)
 
 ## Notes
-- The ISE loader uses the Endpoint Identity Group model; if your environment expects a different “MAC list” object, adjust the API paths/payloads accordingly.
+- The ISE loader uses the Endpoint Identity Group model via ERS endpoints (e.g., `/ers/config/endpointgroup`, `/ers/config/endpoint`, `/ers/config/policyset`). Ensure ERS is enabled.
 - Policy reference check is best-effort: it scans policy sets for the group name string. Tailor it if you need a stricter linkage.
+- When not running `--dryrun`, the loader will create the parent Endpoint Group (default `Sites`) if it is missing, then create the site group under it.
 - Handle credentials securely (avoid committing them). Use environment variables or a secrets manager where possible.

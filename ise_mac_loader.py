@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Load MAC addresses into Cisco ISE (OpenAPI, 3.x+) as an Endpoint Identity Group and report policy usage.
+Load MAC addresses into Cisco ISE (ERS) as an Endpoint Identity Group and report policy usage.
 
 Intended to accept MAC output from meraki_mac_scraper.py (one per line) via stdin or a file.
 
 Usage examples:
-    python ise_mac_loader.py --site-name "My Branch" --ise-url https://ise.local:443/api/v1 \
+    python ise_mac_loader.py --site-name "My Branch" --ise-url https://ise.local:9060 \
         --username admin --password secret --mac-file macs.txt
 
     python meraki_mac_scraper.py --site-name "My Branch" | \
-        python ise_mac_loader.py --site-name "My Branch" --ise-url https://ise.local:443/api/v1 \
+        python ise_mac_loader.py --site-name "My Branch" --ise-url https://ise.local:9060 \
         --username admin --password secret
-    (If you provide only the host, the script appends /api/v1 automatically.)
 
 Authentication:
-    - Basic auth with ISE OpenAPI (3.x+).
+    - Basic auth with ISE ERS API.
     - Credentials can be provided via --username/--password or env vars ISE_USERNAME/ISE_PASSWORD.
 
 Notes:
@@ -22,6 +21,7 @@ Notes:
     - Each MAC is added as an endpoint in that group if not already present.
     - A final check scans policy sets for references to the group name and prints True/False.
     - Use --dryrun to perform read-only validation (no creations/updates).
+    - Parent Endpoint Identity Group defaults to "Sites" (override with --endpoint-parent).
 """
 
 import argparse
@@ -34,7 +34,7 @@ import requests
 
 
 class ISEAPIError(RuntimeError):
-    """Raised when Cisco ISE OpenAPI responds with a non-successful status."""
+    """Raised when Cisco ISE ERS API responds with a non-successful status."""
 
 
 def request_ise(
@@ -47,7 +47,7 @@ def request_ise(
     json: Optional[dict] = None,
 ) -> Tuple[object, dict]:
     """
-    Send an HTTP request to ISE OpenAPI with basic retry for rate limiting.
+    Send an HTTP request to ISE ERS API with basic retry for rate limiting.
 
     Returns (json_body, headers).
     """
@@ -59,7 +59,7 @@ def request_ise(
             time.sleep(wait)
             continue
         if resp.status_code == 401:
-            raise ISEAPIError("Unauthorized: check ISE credentials or OpenAPI access.")
+            raise ISEAPIError("Unauthorized: check ISE credentials or ERS access.")
         if not resp.ok:
             raise ISEAPIError(
                 f"ISE API error {resp.status_code} for {path}: {resp.text}"
@@ -85,32 +85,47 @@ def read_macs(stdin_data: Iterable[str]) -> List[str]:
     return macs
 
 
+def extract_id(resource: Optional[dict]) -> Optional[str]:
+    """Extract an ID from various ISE response shapes."""
+    if not isinstance(resource, dict):
+        return None
+    for key in ("id", "ID", "uuid", "groupId"):
+        val = resource.get(key)
+        if val:
+            return val
+    resp = resource.get("response")
+    if isinstance(resp, dict):
+        return extract_id(resp)
+    return None
+
+
 def get_endpoint_group(
     session: requests.Session, api_base: str, name: str
 ) -> Optional[dict]:
     """Return endpoint group dict if it exists, else None."""
     params = {"size": 100, "filter": f"name.EQ.{name}"}
-    data, _ = request_ise(session, api_base, "GET", "/endpoint-group", params=params)
-    items = []
-    if isinstance(data, dict):
-        items = data.get("response", data.get("resources", [])) or data.get("SearchResult", {}).get("resources", [])
-    for item in items:
-        item_name = item.get("name") or item.get("description") or ""
-        if item_name.lower() == name.lower():
+    data, _ = request_ise(session, api_base, "GET", "/ers/config/endpointgroup", params=params)
+    resources = data.get("SearchResult", {}).get("resources", []) if isinstance(data, dict) else []
+    for item in resources:
+        if item.get("name", "").lower() == name.lower():
             return item
     return None
 
 
 def create_endpoint_group(
-    session: requests.Session, api_base: str, name: str, description: str = ""
+    session: requests.Session, api_base: str, name: str, description: str = "", parent_id: Optional[str] = None
 ) -> dict:
     """Create a new endpoint identity group."""
     payload = {
-        "name": name,
-        "description": description or f"MAC list for {name}",
-        "systemDefined": False,
+        "EndPointGroup": {
+            "name": name,
+            "description": description or f"MAC list for {name}",
+            "systemDefined": False,
+        }
     }
-    data, _ = request_ise(session, api_base, "POST", "/endpoint-group", json=payload)
+    if parent_id:
+        payload["EndPointGroup"]["parentGroupId"] = parent_id
+    data, _ = request_ise(session, api_base, "POST", "/ers/config/endpointgroup", json=payload)
     return data
 
 
@@ -129,11 +144,9 @@ def get_endpoint_by_mac(
 ) -> Optional[dict]:
     """Return endpoint resource for a MAC if it exists."""
     params = {"size": 1, "filter": f"mac.EQ.{mac}"}
-    data, _ = request_ise(session, api_base, "GET", "/endpoint", params=params)
-    items = []
-    if isinstance(data, dict):
-        items = data.get("response", data.get("resources", [])) or data.get("SearchResult", {}).get("resources", [])
-    return items[0] if items else None
+    data, _ = request_ise(session, api_base, "GET", "/ers/config/endpoint", params=params)
+    resources = data.get("SearchResult", {}).get("resources", []) if isinstance(data, dict) else []
+    return resources[0] if resources else None
 
 
 def create_endpoint(
@@ -141,11 +154,13 @@ def create_endpoint(
 ) -> dict:
     """Create a new endpoint with the given MAC and group assignment."""
     payload = {
-        "name": mac,
-        "mac": mac,
-        "groupId": group_id,
+        "ERSEndPoint": {
+            "name": mac,
+            "mac": mac,
+            "groupId": group_id,
+        }
     }
-    data, _ = request_ise(session, api_base, "POST", "/endpoint", json=payload)
+    data, _ = request_ise(session, api_base, "POST", "/ers/config/endpoint", json=payload)
     return data
 
 
@@ -188,16 +203,13 @@ def policy_uses_group(
     ISE does not expose a simple lookup for group usage; this scans policy sets
     and authorization policies textually for the group name.
     """
-    data, _ = request_ise(session, api_base, "GET", "/policy-sets")
-    items = data.get("response") if isinstance(data, dict) else []
-    if items is None:
-        items = data.get("resources", []) if isinstance(data, dict) else []
-    for item in items:
-        # Fetch full policy set details
-        policy_id = item.get("id") or item.get("policySetId")
-        if not policy_id:
+    data, _ = request_ise(session, api_base, "GET", "/ers/config/policyset")
+    resources = data.get("SearchResult", {}).get("resources", []) if isinstance(data, dict) else []
+    for item in resources:
+        href = item.get("link", {}).get("href")
+        if not href:
             continue
-        body, _ = request_ise(session, api_base, "GET", f"/policy-sets/{policy_id}")
+        body, _ = request_ise(session, api_base, "GET", href)
         body_str = str(body).lower()
         if group_name.lower() in body_str:
             return True
@@ -206,7 +218,7 @@ def policy_uses_group(
 
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load MAC addresses into Cisco ISE Endpoint Identity Group (OpenAPI 3.x+)."
+        description="Load MAC addresses into Cisco ISE Endpoint Identity Group (ERS API)."
     )
     parser.add_argument(
         "--site-name",
@@ -220,17 +232,22 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument(
         "--ise-url",
         required=True,
-        help="Base URL for Cisco ISE OpenAPI host or /api/v1 (e.g., https://ise.example.com or https://ise.example.com:443/api/v1).",
+        help="Base URL for Cisco ISE ERS API (e.g., https://ise.example.com:9060).",
+    )
+    parser.add_argument(
+        "--endpoint-parent",
+        default="Sites",
+        help='Parent Endpoint Identity Group name to nest the site group under (default: "Sites").',
     )
     parser.add_argument(
         "--username",
         default=os.getenv("ISE_USERNAME"),
-        help="ISE OpenAPI username (env ISE_USERNAME as fallback).",
+        help="ISE ERS username (env ISE_USERNAME as fallback).",
     )
     parser.add_argument(
         "--password",
         default=os.getenv("ISE_PASSWORD"),
-        help="ISE OpenAPI password (env ISE_PASSWORD as fallback).",
+        help="ISE ERS password (env ISE_PASSWORD as fallback).",
     )
     parser.add_argument(
         "--insecure",
@@ -264,8 +281,6 @@ def main(argv: Iterable[str]) -> int:
         return 1
 
     api_base = args.ise_url.rstrip("/")
-    if not api_base.endswith("/api/v1"):
-        api_base = f"{api_base}/api/v1"
 
     session = requests.Session()
     session.auth = (args.username, args.password)
@@ -273,21 +288,34 @@ def main(argv: Iterable[str]) -> int:
     session.headers.update({"Content-Type": "application/json", "Accept": "application/json"})
 
     try:
+        parent_group = get_endpoint_group(session, api_base, args.endpoint_parent)
         group = get_endpoint_group(session, api_base, args.site_name)
-        if not group:
-            if args.dryrun:
-                print("DRY RUN: Endpoint group not found; skipping MAC and policy checks.")
-                return 0
-            group = create_endpoint_group(session, api_base, args.site_name)
-
-        group_id = group.get("id") or group.get("ID") or group.get("uuid")
-        if not group_id:
-            raise ISEAPIError("Could not determine endpoint group ID.")
 
         if args.dryrun:
+            if not group:
+                print(f"DRY RUN: Endpoint group '{args.site_name}' not found; skipping MAC and policy checks.")
+                print(f"Parent group '{args.endpoint_parent}' exists: {bool(parent_group)}")
+                return 0
+            group_id = extract_id(group)
+            if not group_id:
+                raise ISEAPIError("Could not determine endpoint group ID.")
             existing, missing = check_macs(session, api_base, macs)
             in_policy = policy_uses_group(session, api_base, args.site_name)
         else:
+            if not parent_group:
+                parent_group = create_endpoint_group(session, api_base, args.endpoint_parent)
+            parent_id = extract_id(parent_group)
+            if not parent_id:
+                raise ISEAPIError("Could not determine parent endpoint group ID.")
+
+            if not group:
+                group = create_endpoint_group(
+                    session, api_base, args.site_name, parent_id=parent_id
+                )
+            group_id = extract_id(group)
+            if not group_id:
+                raise ISEAPIError("Could not determine endpoint group ID.")
+
             created, skipped = add_macs_to_group(session, api_base, macs, group_id)
             in_policy = policy_uses_group(session, api_base, args.site_name)
     except (ISEAPIError, FileNotFoundError) as exc:
